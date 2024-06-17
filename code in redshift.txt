@@ -1,0 +1,487 @@
+CREATE TABLE vannk_dev_task.task AS
+SELECT DISTINCT *
+FROM bronze_prod.t_bi_replicate_database_dbo_congviec 
+where data_date='2024-06-08'; -- Replace with the actual table name
+
+
+
+create or replace view vannk_dev_task.cleaned_data_task AS (
+    SELECT
+        *,
+        case
+	        WHEN diengiai IS NOT null and POSITION('[' IN diengiai) = 0 then REPLACE(REPLACE('["' || diengiai|| '"]' , '_x000D_', ''), '\n', '')
+            WHEN diengiai IS NOT NULL and POSITION('[' IN diengiai) != 0 THEN
+                REPLACE(REPLACE(diengiai  , '_x000D_', ''), '\n', '')
+            ELSE
+                NULL
+        END AS cleaned_diengiai
+    FROM
+        vannk_dev_task.task
+);
+
+
+
+create  or replace view vannk_dev_task.extracted_data_task AS (
+SELECT 
+        *,
+        CASE
+            -- WHEN diengiai IS NOT NULL AND json_array_length() = 0 THEN 'error'
+	        when  cleaned_diengiai is null then null
+            WHEN cleaned_diengiai IS NOT NULL  and JSON_ARRAY_LENGTH(cleaned_diengiai) =0 THEN 'error'
+            WHEN cleaned_diengiai IS NOT NULL  and JSON_ARRAY_LENGTH(cleaned_diengiai) !=0  THEN 
+                REGEXP_REPLACE(REGEXP_REPLACE(JSON_EXTRACT_PATH_TEXT(JSON_EXTRACT_ARRAY_ELEMENT_TEXT(cleaned_diengiai, JSON_ARRAY_LENGTH(cleaned_diengiai) - 1), 'NoiDung'), '\\\\"', '"'), '\\\\t', '')
+            ELSE
+                NULL
+        END AS noidungdiengiai,
+        case
+	        when  cleaned_diengiai is null then null
+            WHEN cleaned_diengiai IS NOT NULL  and JSON_ARRAY_LENGTH(cleaned_diengiai) =0 THEN 'error'
+            WHEN cleaned_diengiai IS NOT NULL  and JSON_ARRAY_LENGTH(cleaned_diengiai) !=0 THEN 
+                JSON_EXTRACT_PATH_TEXT(JSON_EXTRACT_ARRAY_ELEMENT_TEXT(cleaned_diengiai, JSON_ARRAY_LENGTH(cleaned_diengiai) - 1), 'ThoiGian')
+            ELSE
+                NULL
+        END AS thoigiandiengiai
+FROM
+        vannk_dev_task.cleaned_data_task
+);
+
+
+create or replace view vannk_dev_task.final_data_task AS (
+    SELECT
+        *,
+        CASE
+            WHEN idtructhuoc IS NOT NULL THEN idtructhuoc
+            WHEN idgiaidoan IS NOT NULL THEN idgiaidoan
+            ELSE idduan
+        END AS id_parent,
+        idduan || '-' || duan AS index_duan,
+        'Task' as phan_loai
+    FROM
+        vannk_dev_task.extracted_data_task
+    where noidungdiengiai is null or noidungdiengiai != 'error'
+);
+
+
+--------df_t
+create or replace view vannk_dev_task.df_t as (
+SELECT
+    id,
+    title,
+    tungay,
+    denngay,
+    index_duan,
+    macongty AS bu,
+    tiendo,
+    id_parent,
+    trangthai,
+    ngaybaocao,
+    noidungdiengiai,
+    thoigiandiengiai,
+    ghichu, 
+    phan_loai
+FROM
+    vannk_dev_task.final_data_task
+);
+
+
+
+
+------ create view df_g
+
+CREATE TABLE vannk_dev_task.giaidoan AS
+    SELECT DISTINCT
+        id,
+        title,
+        tungay,
+        denngay,
+        idduan,
+        duan,
+        macongty as bu,
+        mota,
+        idtructhuoc as id_parent
+    FROM
+        bronze_prod.t_bi_replicate_database_dbo_giaidoan  -- Replace with your actual table name
+    where data_date='2024-06-08'
+;
+ 
+-- SELECT count(*) from cleaned_data_giaidoan;
+create view vannk_dev_task.df_g AS (
+    SELECT
+        *,
+        REPLACE(idduan || '-' || duan, ';#', '-') AS index_duan,
+        'GiaiDoan' AS phan_loai
+    FROM
+        vannk_dev_task.giaidoan
+);
+
+
+
+
+
+
+
+--------------------------------------- df_t and df_g done:
+
+
+
+----- initial df_f ::
+
+-- Concatenate two tables df_t and df_g
+
+
+create table vannk_dev_task.concatenated_data_dff AS (
+    SELECT
+        id,
+        title,
+        tungay,
+        denngay,
+        index_duan,
+        bu,
+        tiendo,
+        id_parent,
+        trangthai,
+        ngaybaocao,
+        noidungdiengiai,
+        thoigiandiengiai,
+        ghichu,
+        phan_loai,
+        null as idduan,
+        null as duan,
+        null as mota
+    FROM
+        vannk_dev_task.df_t  -- Replace with your actual table name
+    UNION ALL
+    SELECT
+        id,
+        title,
+        tungay,
+        denngay,
+        index_duan,
+        bu,
+        null as tiendo,
+        id_parent,
+        null AS trangthai,      -- Assuming these columns do not exist in df_g
+        null AS ngaybaocao,
+        null AS noidungdiengiai,
+        null AS thoigiandiengiai,
+        null AS ghichu,
+        phan_loai,
+        idduan,
+        duan,
+        mota
+    FROM
+        vannk_dev_task.df_g  -- Replace with your actual table name
+);
+
+-- Fill null values in id_parent with 0
+create view vannk_dev_task.filled_data_dff AS (
+    SELECT
+        *,
+        COALESCE(id_parent, 0) AS id_parent_filled
+    FROM
+        vannk_dev_task.concatenated_data_dff
+);
+
+-- Replace empty strings with NULL and convert types
+create view vannk_dev_task.cleaned_data_dff AS (
+    SELECT
+        cast(id as int) as id,
+        title,
+        tungay,
+        denngay,
+        index_duan,
+        bu,
+        tiendo,
+        cast(id_parent_filled as int) AS id_parent,
+        trangthai,
+        ngaybaocao,
+        noidungdiengiai,
+        thoigiandiengiai,
+        NULLIF(ghichu, '') AS ghichu,
+        phan_loai,
+        idduan,
+        duan,
+        mota        
+    FROM
+        vannk_dev_task.filled_data_dff
+);
+
+
+
+-- Create new_id and new_id_parent columns
+create view vannk_dev_task.final_data_dff AS (
+    SELECT
+        *,
+        id || '-' || index_duan AS new_id,
+        id_parent || '-' || index_duan AS new_id_parent
+    FROM
+        vannk_dev_task.cleaned_data_dff
+);
+
+-- Select final output
+
+
+create table vannk_dev_task.df_f as (
+SELECT
+    id,
+    title,
+    tungay,
+    denngay,
+    index_duan,
+    bu,
+    tiendo,
+    id_parent,
+    trangthai,
+    ngaybaocao,
+    noidungdiengiai,
+    thoigiandiengiai,
+    ghichu,
+    phan_loai,
+    idduan,
+    duan,
+    mota,
+    new_id,
+    new_id_parent
+FROM
+    vannk_dev_task.final_data_dff
+);
+
+-------------
+
+
+
+create table vannk_dev_task.dff_after_caculate_family_string as
+WITH RECURSIVE family_string_cte(id, title, tungay, denngay, index_duan, bu, tiendo, id_parent, trangthai, ngaybaocao, noidungdiengiai, thoigiandiengiai, ghichu, phan_loai, idduan, duan, mota, new_id, new_id_parent, family_string, level) AS (
+    SELECT 
+        *, 
+        CAST(id AS VARCHAR(65535)) AS family_string,
+        1 AS level
+    FROM 
+        vannk_dev_task.df_f
+    WHERE 
+        id_parent = 0
+
+    UNION ALL
+
+    SELECT 
+        f.id, f.title, f.tungay, f.denngay, f.index_duan, f.bu, f.tiendo, f.id_parent, f.trangthai, f.ngaybaocao, f.noidungdiengiai, f.thoigiandiengiai, f.ghichu, f.phan_loai, f.idduan, f.duan, f.mota, f.new_id, f.new_id_parent,
+		family_string_cte.family_string|| ' -> ' || f.id::VARCHAR(65535),
+        family_string_cte.level + 1
+    FROM 
+        vannk_dev_task.df_f AS f
+    JOIN 
+        family_string_cte ON f.new_id_parent = family_string_cte.new_id
+)
+SELECT 
+	id, title, tungay, denngay, index_duan, bu, tiendo, id_parent, trangthai, ngaybaocao, noidungdiengiai, thoigiandiengiai, ghichu, phan_loai, idduan, duan, mota, new_id, new_id_parent, 
+    family_string, level
+
+FROM 
+    family_string_cte
+
+UNION ALL
+
+   select id, title, tungay, denngay, index_duan, bu, tiendo, id_parent, trangthai, ngaybaocao, noidungdiengiai, thoigiandiengiai, ghichu, phan_loai, idduan, duan, mota, new_id, new_id_parent, 
+            CAST(id as VARCHAR) as family_string, 1 as level
+from  vannk_dev_task.df_f  where new_id_parent  not in (select  new_id  from vannk_dev_task.df_f ) and id_parent!=0
+;
+
+
+
+
+
+--------------------- final recursive caculate TIENDO::::::::::::::::::::::::::::::
+
+---cách 1: inefficiency (record by record)
+
+create table vannk_dev_task.temp_dff_after_caculate_family_string_order as (
+    select new_id,level from vannk_dev_task.dff_after_caculate_family_string 
+    where tiendo is null and phan_loai='GiaiDoan'
+    ORDER BY level DESC
+);
+
+
+create table vannk_dev_task.temp_dff_result as (
+    select * from vannk_dev_task.dff_after_caculate_family_string 
+    ORDER BY level DESC
+);
+
+-- Create the stored procedure
+CREATE OR REPLACE PROCEDURE vannk_dev_task.calculate_average_value()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    rec RECORD;
+    v_new_id VARCHAR;
+    v_tiendo FLOAT;
+    v_count_children INT;
+    v_level INT;
+BEGIN
+    -- Declare a cursor to iterate over the rows in the desired order
+    FOR rec IN
+        (SELECT new_id,level
+         FROM vannk_dev_task.temp_dff_after_caculate_family_string_order
+         ORDER BY level DESC
+         )
+    LOOP
+        -- Get the values from the current row
+        v_new_id := rec.new_id;
+		v_level:=rec.level;
+        -- count number of children of current id
+        SELECT COUNT(*)
+        INTO v_count_children 
+        FROM vannk_dev_task.temp_dff_result
+        WHERE new_id_parent = v_new_id;
+
+        IF v_count_children != 0 THEN
+            -- Calculate the average TienDo of the children
+            SELECT AVG(tiendo)
+            INTO v_tiendo
+            FROM vannk_dev_task.temp_dff_result
+            WHERE new_id_parent = v_new_id;
+        ELSE
+            v_tiendo := 1;
+        END IF;
+
+        -- Update the TienDo value in the table
+        UPDATE vannk_dev_task.temp_dff_result
+        SET tiendo = v_tiendo
+        WHERE new_id = v_new_id;
+    END LOOP;
+END;
+$$;
+
+CALL vannk_dev_task.calculate_average_value();
+
+
+
+
+
+
+
+----------cach 2::: not done yet  (OPTIMIZE BUT IT's STILL INCORRECT)
+-- Create a recursive CTE to calculate the average TienDo for GiaiDoan rows
+-- Step 1: Precompute the average TienDo and the count of children for each parent
+ create view vannk_dev_task.avg_tiendo(new_id_parent,avg_tiendo) AS (
+    SELECT 
+        new_id_parent,
+        AVG(tiendo) AS avg_tiendo
+    FROM 
+        vannk_dev_task.temp_dff_result
+    GROUP BY 
+        new_id_parent
+);
+create view vannk_dev_task.child_count(new_id_parent,child_count) AS (
+    SELECT 
+        new_id_parent,
+        COUNT(*) AS child_count
+    FROM 
+        vannk_dev_task.temp_dff_result
+    GROUP BY 
+        new_id_parent
+);
+
+-- Step 2: Define the recursive CTE
+WITH RECURSIVE calculate_tiendo(
+        new_id,
+        level,
+        tiendo,
+        new_id_parent,
+        phan_loai) AS (
+    -- Base case: Select all rows with the initial state
+    SELECT
+        new_id,
+        level,
+        tiendo,
+        new_id_parent,
+        phan_loai
+    FROM vannk_dev_task.temp_dff_result
+
+    UNION ALL
+
+    -- Recursive case: Update TienDo for each row based on the average of its children
+    SELECT
+        df.new_id,
+        df.level,
+        CASE 
+            WHEN df.tiendo IS NULL AND df.phan_loai = 'GiaiDoan' THEN
+                CASE 
+                    WHEN cc.child_count = 0 THEN 1
+                    ELSE at.avg_tiendo
+                END
+            ELSE
+                df.tiendo
+        END AS tiendo,
+        df.new_id_parent,
+        df.phan_loai
+    FROM vannk_dev_task.temp_dff_result df
+    -- LEFT JOIN vannk_dev_task.avg_tiendo at 
+
+    LEFT JOIN (SELECT 
+        new_id_parent,
+        AVG(tiendo) AS avg_tiendo
+    FROM 
+        vannk_dev_task.temp_dff_result
+    GROUP BY 
+        new_id_parent) at ON df.new_id = at.new_id_parent
+    -- LEFT JOIN vannk_dev_task.child_count cc 
+    LEFT JOIN vannk_dev_task.child_count cc ON df.new_id = cc.new_id_parent
+    JOIN calculate_tiendo cte ON df.new_id_parent = cte.new_id
+)
+
+-- Update the original table with the calculated values
+UPDATE vannk_dev_task.temp_dff_result 
+SET tiendo = cte.tiendo
+FROM calculate_tiendo cte
+WHERE temp_dff_result.new_id = cte.new_id;
+
+
+
+
+
+
+----------cach 3::: optimize code from cach1  (CHOOSE)
+create table vannk_dev_task.temp_dff_result_test_1 as (
+    select * from vannk_dev_task.dff_after_caculate_family_string 
+    ORDER BY level DESC
+);
+
+CREATE OR REPLACE PROCEDURE vannk_dev_task.calculate_tiendo_procedure_1()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_levelmax INT;
+begin
+	update vannk_dev_task.temp_dff_result_test_1
+	set tiendo=1
+	where new_id not in (select new_id_parent from vannk_dev_task.temp_dff_result_test_1)
+	and phan_loai='GiaiDoan' and tiendo is null;
+
+	SELECT max(level)
+    INTO v_levelmax
+    FROM vannk_dev_task.temp_dff_result_test_1;
+    LOOP
+        -- Update the TienDo values based on the average of the children
+        UPDATE vannk_dev_task.temp_dff_result_test_1 AS df
+        SET tiendo =(SELECT AVG(child.tiendo)
+             FROM vannk_dev_task.temp_dff_result_test_1 child
+             WHERE child.new_id_parent = df.new_id)
+        WHERE df.tiendo IS NULL
+        AND df.phan_loai = 'GiaiDoan'
+        and level= v_levelmax;
+
+        
+       v_levelmax:=v_levelmax-1;
+       
+        -- Exit the loop if no rows were updated
+        EXIT WHEN v_levelmax = 0;
+    END LOOP;
+END;
+$$;
+
+-- Execute the Procedure
+CALL vannk_dev_task.calculate_tiendo_procedure_1();
+
+
+
+
